@@ -14,6 +14,7 @@ import PIL.JpegImagePlugin
 import torch
 import torch.distributed.checkpoint.stateful
 import torchvision
+from torchcodec.decoders import VideoDecoder
 from diffusers.utils import load_image, load_video
 from huggingface_hub import list_repo_files, repo_exists, snapshot_download
 from tqdm.auto import tqdm
@@ -55,8 +56,8 @@ class ImageCaptionFilePairDataset(torch.utils.data.IterableDataset, torch.distri
             if data_file:
                 data.append(
                     {
-                        "caption": (self.root / caption_file).as_posix(),
-                        "image": (self.root / data_file).as_posix(),
+                        "caption": caption_file,
+                        "image": data_file,
                     }
                 )
 
@@ -126,10 +127,11 @@ class VideoCaptionFilePairDataset(torch.utils.data.IterableDataset, torch.distri
         for caption_file in caption_files:
             data_file = self._find_data_file(caption_file)
             if data_file:
+                print(f"Adding data with root {self.root} and file {data_file}")
                 data.append(
                     {
-                        "caption": (self.root / caption_file).as_posix(),
-                        "video": (self.root / data_file).as_posix(),
+                        "caption": caption_file,
+                        "video": data_file,
                     }
                 )
 
@@ -390,6 +392,8 @@ class VideoFolderDataset(torch.utils.data.IterableDataset, torch.distributed.che
         self.infinite = infinite
 
         data = datasets.load_dataset("videofolder", data_dir=self.root.as_posix(), split="train")
+
+        logger.debug(f"Dataset after loading as videofolder: {data}")
 
         self._data = data.to_iterable_dataset()
         self._sample_index = 0
@@ -721,11 +725,15 @@ class IterableDatasetPreprocessingWrapper(
 
             sample = {self.rename_columns.get(k, k): v for k, v in sample.items()}
 
+            logger.debug(f"Dateset sample: {sample}")
+
             for key in sample.keys():
                 if isinstance(sample[key], PIL.Image.Image):
                     sample[key] = _preprocess_image(sample[key])
                 elif isinstance(sample[key], (decord.VideoReader, torchvision.io.video_reader.VideoReader)):
                     sample[key] = _preprocess_video(sample[key])
+                elif isinstance(sample[key], VideoDecoder):
+                    sample[key] = _preprocess_video_from_decoder(sample[key])
 
             if self.dataset_type == "image":
                 if self.image_resolution_buckets:
@@ -872,6 +880,7 @@ def _initialize_local_dataset(
         raise ValueError("Found multiple metadata files. Please ensure there is only one metadata file.")
 
     if len(metadata_files) == 1:
+        logger.debug("Loading image / video folder dataset type")
         if dataset_type == "image":
             dataset = ImageFolderDataset(root.as_posix(), infinite=infinite)
         else:
@@ -884,6 +893,7 @@ def _initialize_local_dataset(
         return _initialize_webdataset(root.as_posix(), dataset_type, infinite, _caption_options=_caption_options)
 
     if _has_data_caption_file_pairs(root, remote=False):
+        logger.debug("Loading file pair dataset type")
         if dataset_type == "image":
             dataset = ImageCaptionFilePairDataset(root.as_posix(), infinite=infinite)
         else:
@@ -1033,6 +1043,18 @@ else:
         try:
             for _ in range(MAX_FRAMES):
                 frames.append(next(video)["data"])
+        except StopIteration:
+            pass
+        video = torch.stack(frames)
+        video = video.float() / 127.5 - 1.0
+        return video
+    
+    def _preprocess_video_from_decoder(video: VideoDecoder) -> torch.Tensor:
+        frames = []
+        # Error driven data loading! torchvision does not expose length of video
+        try:
+            for frame in video:
+                frames.append(frame)
         except StopIteration:
             pass
         video = torch.stack(frames)
