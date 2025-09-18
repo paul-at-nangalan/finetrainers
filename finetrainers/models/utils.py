@@ -83,7 +83,7 @@ def _expand_linear_with_zeroed_weights(
 
 @torch.no_grad()
 def _expand_conv3d_with_zeroed_weights(
-    module: torch.nn.Linear, new_in_channels: Optional[int] = None, new_out_channels: Optional[int] = None
+    module: torch.nn.Conv3d, new_in_channels: Optional[int] = None, new_out_channels: Optional[int] = None
 ) -> torch.nn.Conv3d:
     if new_in_channels is None:
         new_in_channels = module.in_channels
@@ -99,8 +99,9 @@ def _expand_conv3d_with_zeroed_weights(
         dilation=module.dilation,
         groups=module.groups,
         bias=bias is not None,
+        device=module.weight.device,
+        dtype=module.weight.dtype,
     )
-    new_module.to(device=module.weight.device, dtype=module.weight.dtype)
     new_module.weight.zero_()
     new_module.weight.data[: module.weight.data.shape[0], : module.weight.data.shape[1]].copy_(module.weight.data)
     if bias is not None:
